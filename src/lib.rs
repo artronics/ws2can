@@ -1,15 +1,20 @@
+use can::CanFrame;
 use futures_util::{future, pin_mut, stream::TryStreamExt, FutureExt, StreamExt, TryFutureExt};
 use log::*;
 use std::borrow::Borrow;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{self, oneshot};
+use tokio_socketcan::{CANSocket, Error};
 
 type Sender<T = CanFrame> = sync::mpsc::Sender<T>;
 type Receiver<T = CanFrame> = sync::mpsc::Receiver<T>;
 
-#[derive(Debug)]
-struct CanFrame {}
+mod can;
+
+fn a_frame() -> CanFrame {
+    CanFrame::new(0x123, [3; 8], 5, false, false)
+}
 
 async fn handle_ws_connection(raw_stream: TcpStream, addr: SocketAddr, can_tx: &Sender) {
     info!("Incoming TCP connection from: {}", addr);
@@ -27,7 +32,7 @@ async fn handle_ws_connection(raw_stream: TcpStream, addr: SocketAddr, can_tx: &
             match msg {
                 Ok(msg) => {
                     info!("mes {}", msg);
-                    can_tx.clone().send(CanFrame {}).await;
+                    can_tx.clone().send(a_frame()).await;
                 }
                 Err(e) => {
                     error!("Error occurred while WS receiving a message: {:?}", e);
@@ -49,23 +54,39 @@ async fn start_ws(addr: &str, can_tx: &Sender) {
     }
 }
 
+async fn start_can(can_addr: &str, ws_tx: Sender) {
+    let mut socket_rx = CANSocket::open(can_addr).unwrap();
+    tokio::spawn(async move {
+        while let Some(Ok(frame)) = socket_rx.next().await {
+            ws_tx.clone().send(a_frame()).await;
+            println!("frame {:?}", frame);
+        }
+    })
+    .await;
+}
+
 ///         (tx    ,     rx)      = sync::oneshot::channel();
 ///     -> can_tx ----> ws_rx ->
 ///  WS                          CAN
 ///     <- ws_tx <---- can_rx <-
-pub async fn run(ws_addr: String) {
+pub async fn run(ws_addr: String, can_addr: String) {
     let (can_tx, mut ws_rx) = sync::mpsc::channel(100);
-    // let (ws_tx, can_rx) = sync::oneshot::channel();
-    can_tx.clone().send(CanFrame {}).await;
+    let (ws_tx, mut can_rx) = sync::mpsc::channel(100);
 
     let ws = start_ws(&ws_addr, &can_tx);
-
-    let rc = tokio::spawn(async move {
+    let can = start_can(&can_addr, ws_tx);
+    let ws_receiver = tokio::spawn(async move {
         while let Some(f) = ws_rx.recv().await {
             println!("go to can {:?}", f);
         }
     });
-    tokio::join!(ws, rc);
+    let can_receiver = tokio::spawn(async move {
+        while let Some(f) = can_rx.recv().await {
+            println!("received from can {:?}", f);
+        }
+    });
+
+    tokio::join!(ws, ws_receiver, can);
 }
 
 #[cfg(test)]
