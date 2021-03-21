@@ -2,11 +2,14 @@ use std::borrow::Borrow;
 use std::net::SocketAddr;
 use std::result::Result::Ok;
 
-use futures_util::{future, pin_mut, stream::TryStreamExt, FutureExt, StreamExt, TryFutureExt};
+use futures_util::{
+    future, pin_mut, stream::TryStreamExt, FutureExt, SinkExt, StreamExt, TryFutureExt,
+};
 use log::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{self, oneshot};
 use tokio_socketcan::{CANFrame, CANSocket, Error};
+use tokio_tungstenite::tungstenite::Message;
 
 use can::CanFrame;
 
@@ -19,7 +22,12 @@ fn a_frame() -> CanFrame {
     CanFrame::new(0x123, [3; 8], 5, false, false)
 }
 
-async fn handle_ws_connection(raw_stream: TcpStream, addr: SocketAddr, in_tx: &Sender) {
+async fn handle_ws_connection(
+    raw_stream: TcpStream,
+    addr: SocketAddr,
+    in_tx: &Sender,
+    mut out_rx: Receiver,
+) {
     info!("Incoming TCP connection from: {}", addr);
 
     let stream = tokio_tungstenite::accept_async(raw_stream)
@@ -27,31 +35,52 @@ async fn handle_ws_connection(raw_stream: TcpStream, addr: SocketAddr, in_tx: &S
         .expect("Error during the websocket handshake occurred");
     info!("WebSocket connection established: {}", addr);
 
-    let (outgoing, incoming) = stream.split();
+    let (mut outgoing, incoming) = stream.split();
 
-    incoming
-        .for_each(|msg| async move {
-            match msg {
-                Ok(msg) => {
-                    if let Ok(msg) = msg.to_text() {
-                        if let Ok(can_frame) = CanFrame::from_json(msg) {
-                            trace!("Get frame from WS: {:?}", &can_frame);
-                            info!("Get frame from WS: {:?}", &can_frame);
-                            in_tx.clone().send(can_frame.to_linux_frame()).await;
-                        } else {
-                            error!("Couldn't parse received can frame json: {}", msg);
-                        }
+    let ws_receiver = incoming.for_each(|msg| async move {
+        match msg {
+            Ok(msg) => {
+                if let Ok(msg) = msg.to_text() {
+                    if let Ok(can_frame) = CanFrame::from_json(msg) {
+                        trace!("Get frame from WS: {:?}", &can_frame);
+                        info!("Get frame from WS: {:?}", &can_frame);
+                        in_tx.clone().send(can_frame.to_linux_frame()).await;
+                    } else {
+                        error!("Couldn't parse received can frame json: {}", msg);
                     }
                 }
-                Err(e) => {
-                    error!("Error occurred while WS receiving a message: {:?}", e);
+            }
+            Err(e) => {
+                error!("Error occurred while WS receiving a message: {:?}", e);
+            }
+        }
+    });
+
+    let ws_transmitter = tokio::spawn(async move {
+        info!("i'm running");
+        while let f = out_rx.recv().await {
+            match f {
+                Some(f) => {
+                    info!("received from can {:?}", f);
+                    let j = CanFrame::from_linux_frame(f).to_json();
+                    let msg = Message::Text(j);
+                    outgoing.send(msg).await;
+                }
+                _ => {
+                    info!("errr");
                 }
             }
-        })
-        .await;
+        }
+    });
+
+    pin_mut!(ws_receiver, ws_transmitter);
+    future::select(ws_receiver, ws_transmitter).await;
+    info!("disconnected");
+    // tokio::join!(_f);
+    // out_rx.map(Ok).forward(outgoing).await;
 }
 
-async fn start_ws(addr: &str, in_tx: &Sender) {
+async fn start_ws(addr: &str, in_tx: &Sender, out_rx: Receiver) {
     let listener = TcpListener::bind(addr)
         .await
         .expect(&format!("Can't bind websocket address {}", addr));
@@ -59,46 +88,49 @@ async fn start_ws(addr: &str, in_tx: &Sender) {
     info!("Listening on: {}", addr);
 
     if let Ok((stream, addr)) = listener.accept().await {
-        handle_ws_connection(stream, addr, &in_tx).await;
+        handle_ws_connection(stream, addr, &in_tx, out_rx).await;
     }
 }
 
-async fn start_can(can_addr: &str, ws_tx: Sender) {
-    let mut socket_rx = CANSocket::open(can_addr).unwrap();
+async fn start_can(
+    mut socket_rx: CANSocket,
+    out_tx: Sender,
+) -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         while let Some(Ok(frame)) = socket_rx.next().await {
-            ws_tx.clone().send(a_frame().to_linux_frame()).await;
-            println!("frame {:?}", frame);
+            out_tx.clone().send(frame).await;
+            info!("frame {:?}", frame);
         }
     })
     .await;
+    Ok(())
 }
 
-///         (in_tx    ,     in_rx)      = sync::mpsc::channel();
-///         (out_tx    ,     out_rx)      = sync::mpsc::channel();
+///       (in_tx   ,   in_rx )      = sync::mpsc::channel();
+///       (out_tx  ,   out_rx)      = sync::mpsc::channel();
 ///     -> in_tx ----> in_rx ->
-///     -> can_tx ----> ws_rx ->
 ///  WS                          CAN
-///     <- ws_tx <---- can_rx <-
 ///     <- out_tx <---- out_rx <-
 pub async fn run(ws_addr: String, can_addr: String) -> Result<(), Box<dyn std::error::Error>> {
     let (in_tx, mut in_rx) = sync::mpsc::channel(100);
-    let (ws_tx, mut out_rx) = sync::mpsc::channel(100);
+    let (out_tx, mut out_rx) = sync::mpsc::channel(100);
 
-    let ws = start_ws(&ws_addr, &in_tx);
-    let can = start_can(&can_addr, ws_tx);
-    let mut socket_tx = CANSocket::open(&can_addr).unwrap();
+    let mut socket_rx = CANSocket::open(&can_addr)?;
+    let socket_tx = CANSocket::open(&can_addr)?;
+
+    let ws = start_ws(&ws_addr, &in_tx, out_rx);
+    let can = start_can(socket_rx, out_tx);
     let ws_receiver = tokio::spawn(async move {
         while let Some(f) = in_rx.recv().await {
             info!("write can {:?}", &f);
             socket_tx.write_frame(f).unwrap().await;
         }
     });
-    let can_receiver = tokio::spawn(async move {
-        while let Some(f) = out_rx.recv().await {
-            println!("received from can {:?}", f);
-        }
-    });
+    // let can_receiver = tokio::spawn(async move {
+    //     while let Some(f) = out_rx.recv().await {
+    //         println!("received from can {:?}", f);
+    //     }
+    // });
 
     tokio::join!(ws, ws_receiver, can);
     Ok(())
