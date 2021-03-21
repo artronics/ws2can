@@ -1,7 +1,6 @@
 use serde_derive::{Deserialize, Serialize};
-use serde_json::Result as SerdeResult;
-use serde_json::{json, Result};
-use tokio_socketcan::{CANFrame, CANSocket};
+use serde_json::Result;
+use tokio_socketcan::CANFrame;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CanFrame {
@@ -12,15 +11,6 @@ pub struct CanFrame {
 }
 
 impl CanFrame {
-    pub fn new(id: u32, data: Vec<u8>, is_remote: bool, is_error: bool) -> Self {
-        CanFrame {
-            id,
-            data,
-            is_remote,
-            is_error,
-        }
-    }
-
     pub fn from_json(json: &str) -> Result<Self> {
         serde_json::from_str(json)
     }
@@ -48,7 +38,6 @@ impl CanFrame {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use serde_json::Result;
 
     use super::*;
@@ -75,7 +64,12 @@ mod tests {
 
     #[test]
     fn deserialize_can_frame() -> Result<()> {
-        let frame = CanFrame::new(12, vec![3; 5], true, false);
+        let frame = CanFrame {
+            id: 12,
+            data: vec![3; 5],
+            is_remote: true,
+            is_error: false,
+        };
 
         let json = frame.to_json();
         let serialized: CanFrame = CanFrame::from_json(json.as_str())?;

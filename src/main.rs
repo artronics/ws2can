@@ -1,9 +1,6 @@
 use std::env;
-use std::io;
 
 use ws2can::run;
-
-mod can;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
