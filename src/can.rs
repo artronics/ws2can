@@ -6,24 +6,16 @@ use tokio_socketcan::{CANFrame, CANSocket};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CanFrame {
     id: u32,
-    data: [u8; 8],
-    data_length: usize,
+    data: Vec<u8>,
     is_remote: bool,
     is_error: bool,
 }
 
 impl CanFrame {
-    pub fn new(
-        id: u32,
-        data: [u8; 8],
-        data_length: usize,
-        is_remote: bool,
-        is_error: bool,
-    ) -> Self {
+    pub fn new(id: u32, data: Vec<u8>, is_remote: bool, is_error: bool) -> Self {
         CanFrame {
             id,
             data,
-            data_length,
             is_remote,
             is_error,
         }
@@ -38,14 +30,13 @@ impl CanFrame {
     }
 
     pub fn from_linux_frame(f: CANFrame) -> Self {
-        let mut data = [0; 8];
+        let mut data = vec![];
         for i in 0..f.data().len() {
-            data[i] = f.data()[i];
+            data.push(f.data()[i]);
         }
         CanFrame {
             id: f.id(),
             data,
-            data_length: f.data().len(),
             is_error: f.is_error(),
             is_remote: f.is_rtr(),
         }
@@ -57,24 +48,24 @@ impl CanFrame {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use serde_json::Result;
+
+    use super::*;
 
     #[test]
     fn serialize_can_frame() -> Result<()> {
         let frame = r#"
             {
               "id": 123,
-              "data": [123, 123, 23, 0, 0, 0, 0, 0],
-              "data_length": 3,
+              "data": [123, 123, 23],
               "is_remote": false,
               "is_error": false
             }
         "#;
 
         let f: CanFrame = CanFrame::from_json(frame)?;
-        assert_eq!(f.data_length, 3);
+        assert_eq!(f.data.len(), 3);
         assert_eq!(f.is_remote, false);
         assert_eq!(f.is_remote, false);
         assert_eq!(f.data[2], 23);
@@ -84,11 +75,11 @@ mod tests {
 
     #[test]
     fn deserialize_can_frame() -> Result<()> {
-        let frame = CanFrame::new(12, [3; 8], 4, true, false);
+        let frame = CanFrame::new(12, vec![3; 5], true, false);
 
         let json = frame.to_json();
         let serialized: CanFrame = CanFrame::from_json(json.as_str())?;
-        assert_eq!(serialized.data_length, 4);
+        assert_eq!(serialized.data.len(), 5);
         assert_eq!(serialized.is_remote, true);
         Ok(())
     }
