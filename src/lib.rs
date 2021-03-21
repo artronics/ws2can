@@ -114,7 +114,7 @@ async fn start_can(
 ///     -> in_tx ----> in_rx ->
 ///  WS                          CAN
 ///     <- out_tx <---- out_rx <-
-pub async fn run(ws_addr: String, can_addr: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(ws_addr: &str, can_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let (in_tx, mut in_rx) = sync::mpsc::channel(100);
     let (out_tx, mut out_rx) = sync::mpsc::channel(100);
 
