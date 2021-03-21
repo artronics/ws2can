@@ -78,16 +78,33 @@ async fn start_ws(addr: &str, in_tx: &Sender, out_rx: Receiver) {
 }
 
 async fn start_can(
-    mut socket_rx: CANSocket,
-    out_tx: Sender,
+    can_addr: &str,
+    out_tx: &Sender,
+    mut in_rx: Receiver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tokio::spawn(async move {
-        while let Some(Ok(frame)) = socket_rx.next().await {
-            out_tx.clone().send(frame).await;
-            info!("CAN(in): {:?}", frame);
+    let mut can_socket = CANSocket::open(&can_addr)?;
+    let (mut outgoing, incoming) = can_socket.split();
+
+    let can_receiver = incoming.for_each(|msg| async move {
+        match msg {
+            Ok(msg) => {
+                info!("CAN(in): {:?}", msg);
+                out_tx.clone().send(msg).await;
+            }
+            Err(e) => {
+                error!("Error occurred while CAN receiving a message: {:?}", e);
+            }
         }
-    })
-    .await;
+    });
+
+    let can_transmitter = tokio::spawn(async move {
+        while let Some(f) = in_rx.recv().await {
+            info!("CAN(out): {:?}", f);
+            outgoing.send(f).await;
+        }
+    });
+
+    tokio::join!(can_transmitter, can_receiver);
 
     Ok(())
 }
@@ -101,19 +118,10 @@ pub async fn run(ws_addr: String, can_addr: String) -> Result<(), Box<dyn std::e
     let (in_tx, mut in_rx) = sync::mpsc::channel(100);
     let (out_tx, mut out_rx) = sync::mpsc::channel(100);
 
-    let mut socket_rx = CANSocket::open(&can_addr)?;
-    let socket_tx = CANSocket::open(&can_addr)?;
-
     let ws = start_ws(&ws_addr, &in_tx, out_rx);
-    let can = start_can(socket_rx, out_tx);
-    let ws_receiver = tokio::spawn(async move {
-        while let Some(f) = in_rx.recv().await {
-            info!("CAN(out): {:?}", f);
-            socket_tx.write_frame(f).unwrap().await;
-        }
-    });
+    let can = start_can(&can_addr, &out_tx, in_rx);
 
-    tokio::join!(ws, ws_receiver, can);
+    tokio::join!(ws, can);
 
     Ok(())
 }
