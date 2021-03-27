@@ -1,7 +1,9 @@
 [package]
 name = "ws2can"
 version = "0.1.0"
-authors = ["jalal <jalalhosseiny@gmail.com>"]
+authors = ["jalal - artronics"]
+license = "MIT"
+description = "A websocket to socketcan convertor. It receives a json CAN frame and send it via socketcan to the device"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
